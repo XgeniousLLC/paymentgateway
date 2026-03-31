@@ -37,19 +37,6 @@ A Laravel package to manage multiple payment gateways with a unified API.
 
 ## Installation
 
-**Step 1 — Add the VCS repository to your `composer.json`:**
-
-```json
-"repositories": [
-    {
-        "type": "vcs",
-        "url": "https://github.com/XgeniousLLC/paymentgateway.git"
-    }
-]
-```
-
-**Step 2 — Require the package:**
-
 ```shell
 composer require xgenious/paymentgateway
 ```
