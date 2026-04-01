@@ -14,19 +14,14 @@ This guide provides a complete working integration of CinetPay into your Laravel
 
 ---
 
-## 🧪 Step 1: Environment Configuration
+## Step 1: Get Your Credentials
 
-Add the following to your `.env` file:
+Log in to your [CinetPay dashboard](https://cinetpay.com) and retrieve:
 
-```env
-CINETPAY_APP_KEY=12912847765bc0db748fdd44.40081707
-CINETPAY_SITE_ID=445160
-CINETPAY_TEST_MODE=on
-````
-## OR
+- **API Key** (App Key)
+- **Site ID**
 
-Configure these in the admin panel:
-**Admin Panel → General Settings → Payment Gateway Settings → CinetPay**
+Pass them directly via setter methods — see Step 4 below.
 
 ---
 
@@ -132,24 +127,9 @@ public function cinetpay_return(Request $request)
 
 ---
 
-## 🧪 Test Credentials (from CinetPay)
-
-```text
-API Key: 12912847765bc0db748fdd44.40081707
-Site ID: 445160
-```
-
-Enable test mode with:
-
-```env
-CINETPAY_TEST_MODE=on
-```
-
----
-
 ## ✅ Integration Checklist
 
-* [x] `.env` configured
+* [x] CinetPay API Key and Site ID retrieved from dashboard
 * [x] CinetPay enabled in admin panel
 * [x] Routes defined
 * [x] CSRF protection bypassed for notify
