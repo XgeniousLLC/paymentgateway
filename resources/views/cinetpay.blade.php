@@ -1,22 +1,12 @@
 <html>
 <head>
     <title>{{__('CinetPay Payment Gateway')}}</title>
+    <meta http-equiv="refresh" content="0;url={{ $payment_url ?? '/' }}">
 </head>
 <body>
-{!! $payButton !!}
-<script>
-    (function(){
-        "use strict";
-
-        var submitBtn = document.querySelector('#goCinetPay button.cpButton');
-        submitBtn.innerHTML = "{{__('Redirecting Please Wait...')}}";
-        submitBtn.style.color = "#fff";
-        submitBtn.style.backgroundColor = "#c54949";
-        submitBtn.style.border = "none";
-        document.addEventListener('DOMContentLoaded',function (){
-            submitBtn.dispatchEvent(new MouseEvent('click'));
-        },false);
-    })();
-</script>
+    <p>{{__('Redirecting to CinetPay, please wait...')}}</p>
+    @isset($payment_url)
+        <script>window.location.href = "{{ $payment_url }}";</script>
+    @endisset
 </body>
 </html>
