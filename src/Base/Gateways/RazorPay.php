@@ -68,7 +68,7 @@ class RazorPay extends PaymentGatewayBase
                 'item' => [
                     'name' => $plan_data['item_name'],
                     'description' => $plan_data['description'] ?? 'Subscription Plan',
-                    'amount' => (int)($plan_data['amount'] * 100), // Convert to paise
+                    'amount' => (int) round($plan_data['amount'] * 100), // Convert to paise
                     'currency' => 'INR'
                 ]
             ];
@@ -210,8 +210,8 @@ class RazorPay extends PaymentGatewayBase
     private function savePlanToDatabase($app_plan_id, $razorpay_plan_id)
     {
         try {
-            // Update PricePlan model
-            \App\Models\PricePlan::where('id', $app_plan_id)
+            $modelClass = config('paymentgateway.razorpay.price_plan_model', \App\Models\PricePlan::class);
+            $modelClass::where('id', $app_plan_id)
                 ->update([
                     'razorpay_plan_id' => $razorpay_plan_id,
                     'razorpay_synced_at' => now()
@@ -240,7 +240,7 @@ class RazorPay extends PaymentGatewayBase
     /**
      * Main charge_customer method with dynamic subscription support
      */
-    public function charge_customer($args)//
+    public function charge_customer($args)
     {
         $amount_in_inr = $this->charge_amount($args['amount']);
 
@@ -255,7 +255,6 @@ class RazorPay extends PaymentGatewayBase
             'payment_log_id' => $args['order_id'],
             'order_id' => $args['order_id']
         ];
-        // payment ata dia nicche na? atai to payment ar file,?haa to atar request ar body te to kono cancel url dewa nai..
         session()->put('razorpay_last_order_id',$args['order_id']);
 
         // Check if subscription is requested (via $args['is_subscription'])
@@ -279,7 +278,7 @@ class RazorPay extends PaymentGatewayBase
             $plan_result = $this->getOrCreatePlan($args['plan_config']);
 
             if ($plan_result['status'] !== 'success') {
-                abort(500, 'Failed to create subscription plan: ' . $plan_result['message']);
+                throw new \RuntimeException('Failed to create subscription plan: ' . $plan_result['message']);
             }
 
             $plan_id = $plan_result['plan_id'];
@@ -314,7 +313,7 @@ class RazorPay extends PaymentGatewayBase
 
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::error('Subscription creation failed', ['error' => $e->getMessage()]);
-            abort(500, 'Subscription Error: ' . $e->getMessage());
+            throw new \RuntimeException('Subscription Error: ' . $e->getMessage(), 0, $e);
         }
 
         return view('paymentgateway::razorpay')->with('razorpay_data', $razorpay_data);
@@ -325,7 +324,7 @@ class RazorPay extends PaymentGatewayBase
      */
     private function createOneTimePayment($args, &$razorpay_data)
     {
-        $order_id = random_int(12345, 99999) . $args['order_id'] . random_int(12345, 99999);
+        $order_id = 'RZ' . random_int(10000, 99999) . '_' . $args['order_id'] . '_' . random_int(10000, 99999) . 'RZ';
 
         $razorpay_data['price'] = $args['amount'];
         $razorpay_data['order_id'] = $order_id;
@@ -420,9 +419,9 @@ class RazorPay extends PaymentGatewayBase
         $razorpay_payment_id = request()->razorpay_payment_id;
         $order_id = request()->order_id;
 
-        // Remove padding from order_id if present
-        if (\strlen($order_id) > 10) {
-            $order_id = \substr($order_id, 5, -5);
+        // Remove padding from order_id if present (format: RZ{5digits}_{original}_{5digits}RZ)
+        if (preg_match('/^RZ\d{5}_(.+)_\d{5}RZ$/', $order_id, $matches)) {
+            $order_id = $matches[1];
         }
 
         // Check if webhook already processed this payment
