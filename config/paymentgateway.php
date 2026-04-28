@@ -44,9 +44,10 @@ return [
     'razorpay' => [
         'api_key' => env('RAZORPAY_API_KEY',null),
         'api_secret' => env('RAZORPAY_API_SECRET',null),
+        'price_plan_model' => \App\Models\PricePlan::class,
     ],
     'mollie' => [
-      'public_key' => env('MOLLIE_KEY',null)
+        'public_key' => env('MOLLIE_KEY',null)
     ],
     'flutterwave' => [
         'public_key' => env('FLW_PUBLIC_KEY',null),
@@ -72,14 +73,14 @@ return [
         'secret_key' => env('CASHFREE_SECRET_KEY'),
     ],
     'instamojo' => [
-      'client_id' => env('INSTAMOJO_CLIENT_ID'),
-      'client_secret' => env('INSTAMOJO_CLIENT_SECRET'),
-      'test_mode' => env('INSTAMOJO_TEST_MODE',true),
+        'client_id' => env('INSTAMOJO_CLIENT_ID'),
+        'client_secret' => env('INSTAMOJO_CLIENT_SECRET'),
+        'test_mode' => env('INSTAMOJO_TEST_MODE',true),
     ],
     'mercadopago' => [
-      'client_id' => env('MERCADO_PAGO_CLIENT_ID'),
-      'client_secret' => env('MERCADO_PAGO_CLIENT_SECRET'),
-      'test_mode' => env('MERCADO_PAGO_TEST_MODE',true),
+        'client_id' => env('MERCADO_PAGO_CLIENT_ID'),
+        'client_secret' => env('MERCADO_PAGO_CLIENT_SECRET'),
+        'test_mode' => env('MERCADO_PAGO_TEST_MODE',true),
     ],
     'global_currency' => env('SITE_GLOBAL_CURRENCY','USD'),
     'ngn_exchange_rate' => env('NGN_EXCHANGE_RATE',null),
