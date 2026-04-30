@@ -46,6 +46,7 @@ return [
         'api_secret' => env('RAZORPAY_API_SECRET',null),
         'price_plan_model' => \App\Models\PricePlan::class,
     ],
+    'payment_log_model' => \App\Models\PaymentLogs::class,
     'mollie' => [
         'public_key' => env('MOLLIE_KEY',null)
     ],

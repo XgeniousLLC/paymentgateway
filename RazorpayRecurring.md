@@ -742,6 +742,83 @@ Add these to your admin panel or database:
 
 ---
 
+## 🔧 Package-Level Bug Fixes
+
+### Fix: Hardcoded `PaymentLogs` Model Causes Fatal Error in Other Projects
+
+#### Problem
+
+In `src/Base/Gateways/RazorPay.php`, line 430 directly calls:
+
+```php
+$payment_log = \App\Models\PaymentLogs::find($order_id);
+```
+
+This is a **race-condition guard** — if a Razorpay webhook already marked the payment as `complete` before the IPN callback fires, this check skips a redundant API verification call. However, because the class is hardcoded to `\App\Models\PaymentLogs`, any consuming project that:
+
+- uses a different namespace (e.g. `App\Models\Billing\PaymentLog`)
+- uses a different class name (e.g. `PaymentLog` instead of `PaymentLogs`)
+- does not have this model at all
+
+...will get a **fatal `Class not found` error** at runtime, breaking the entire IPN flow.
+
+---
+
+#### Fix — Two Parts
+
+**Part 1 — `src/Base/Gateways/RazorPay.php`**
+
+The hardcoded class is replaced with a config-driven lookup, protected by a `class_exists()` guard:
+
+```php
+// Before (hardcoded — fatal if class is missing)
+$payment_log = \App\Models\PaymentLogs::find($order_id);
+
+// After (configurable + safe)
+$paymentLogModel = config('paymentgateway.payment_log_model', \App\Models\PaymentLogs::class);
+if (!class_exists($paymentLogModel)) {
+    throw new \RuntimeException("Payment log model [{$paymentLogModel}] not found, skipping webhook check.");
+}
+$payment_log = $paymentLogModel::find($order_id);
+```
+
+**How it behaves when the class is missing:**
+The `RuntimeException` is caught by the surrounding `try/catch`. It logs a warning and falls through to the live Razorpay API verification — so the **payment still completes**, just without the webhook short-circuit optimization.
+
+**Part 2 — `config/paymentgateway.php`**
+
+A top-level `payment_log_model` key is added (not nested under `razorpay`, since other gateways may need the same check):
+
+```php
+'payment_log_model' => \App\Models\PaymentLogs::class,
+```
+
+---
+
+#### How Consuming Projects Override This
+
+After publishing the package config (`php artisan vendor:publish --tag=paymentgateway-config`), open `config/paymentgateway.php` and set the key to match your own model:
+
+```php
+// config/paymentgateway.php
+
+'payment_log_model' => \App\Models\PaymentLog::class,        // different class name
+// or
+'payment_log_model' => \App\Models\Billing\PaymentLog::class, // different namespace
+// or leave as default if your project uses App\Models\PaymentLogs
+```
+
+> **Why top-level and not under `razorpay`?**
+> `PaymentLogs` is an app-wide model — not Razorpay-specific. Any gateway could need the same guard in the future. Compare with `razorpay.price_plan_model`, which sits under `razorpay` because it stores Razorpay-specific columns (`razorpay_plan_id`, `razorpay_synced_at`). App-wide models belong at the top level.
+
+---
+
+#### Why the Surrounding `try/catch` Is Safe
+
+The block at line 429 already wraps the entire model check in `try/catch`. If the model class is missing, the exception is logged as a warning (not an error) and execution continues into the standard Razorpay API payment verification path. There is **no silent failure** — the payment is still verified, just via API instead of the database shortcut.
+
+---
+
 ## 🚀 Deployment Checklist
 
 Before deploying to production:

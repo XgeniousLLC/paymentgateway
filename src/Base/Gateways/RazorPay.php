@@ -427,7 +427,11 @@ class RazorPay extends PaymentGatewayBase
         // Check if webhook already processed this payment
         // This handles race conditions where webhook completes before IPN callback
         try {
-            $payment_log = \App\Models\PaymentLogs::find($order_id);
+            $paymentLogModel = config('paymentgateway.payment_log_model', \App\Models\PaymentLogs::class);
+            if (!class_exists($paymentLogModel)) {
+                throw new \RuntimeException("Payment log model [{$paymentLogModel}] not found, skipping webhook check.");
+            }
+            $payment_log = $paymentLogModel::find($order_id);
             if ($payment_log && $payment_log->payment_status === 'complete' && $payment_log->transaction_id === $razorpay_payment_id) {
                 \Illuminate\Support\Facades\Log::info('Payment already completed by webhook, skipping API verification', [
                     'payment_id' => $razorpay_payment_id,
