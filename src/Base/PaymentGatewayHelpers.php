@@ -38,6 +38,7 @@ use Xgenious\Paymentgateway\Base\Gateways\YooMoneyPay;
 use Xgenious\Paymentgateway\Base\Gateways\ZitoPay;
 use Xgenious\Paymentgateway\Base\Gateways\AirwallexPay;
 use Xgenious\Paymentgateway\Base\Gateways\AdyenPay;
+use Xgenious\Paymentgateway\Base\Gateways\PayuPay;
 
 /**
  * @see SquarePay
@@ -205,6 +206,11 @@ class PaymentGatewayHelpers
         return new AdyenPay();
     }
 
+    public function payu() : PayuPay
+    {
+        return new PayuPay();
+    }
+
     public function all_payment_gateway_list() : array
     {
         return [
@@ -214,7 +220,7 @@ class PaymentGatewayHelpers
             'midtrans','paypal','stripe','toyyibpay','pagali','authorizenet',
             'sitesway','transactionclud','wipay','kineticpay','senangpay','saltpay','paymob',
             'iyzipay','powertranz','awdPay','yoomoney','coinpayments','sslcommerz','xendit','airwallex',
-            'adyen',
+            'adyen','payu',
 //            'payumoney',
         ];
     }
