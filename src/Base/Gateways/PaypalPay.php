@@ -2,46 +2,54 @@
 
 namespace Xgenious\Paymentgateway\Base\Gateways;
 
-use Illuminate\Support\Facades\Config;
-use Xgenious\Paymentgateway\Base\GlobalCurrency;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
-use Srmklive\PayPal\Services\PayPal as PayPalClient;
 use Xgenious\Paymentgateway\Traits\ConvertUsdSupport;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
+use PayPalCheckoutSdk\Core\PayPalHttpClient;
+use PayPalCheckoutSdk\Core\SandboxEnvironment;
+use PayPalCheckoutSdk\Core\ProductionEnvironment;
+use PayPalCheckoutSdk\Orders\OrdersCreateRequest;
+use PayPalCheckoutSdk\Orders\OrdersGetRequest;
 
 class PaypalPay extends PaymentGatewayBase
 {
-    use PaymentEnvironment,CurrencySupport,ConvertUsdSupport;
+    use PaymentEnvironment, CurrencySupport, ConvertUsdSupport;
     protected $client_id;
     protected $client_secret;
     protected $app_id;
 
     /* get app id */
-    private function getAppId(){
+    private function getAppId()
+    {
         return  $this->app_id;
     }
     /* set app id */
-    public function setAppId($app_id){
+    public function setAppId($app_id)
+    {
         $this->app_id = $app_id;
         return $this;
     }
     /* set app id */
-    public function setClientId($client_id){
+    public function setClientId($client_id)
+    {
         $this->client_id = $client_id;
         return $this;
     }
     /* set app secret */
-    public function setClientSecret($client_secret){
+    public function setClientSecret($client_secret)
+    {
         $this->client_secret = $client_secret;
         return $this;
     }
     /* get app id */
-    private function getClientId(){
+    private function getClientId()
+    {
         return  $this->client_id;
     }
     /* get secret key */
-    private function getClientSecret(){
+    private function getClientSecret()
+    {
         return $this->client_secret;
     }
     /*
@@ -53,38 +61,20 @@ class PaypalPay extends PaymentGatewayBase
     * */
     public function charge_amount($amount)
     {
-        if (in_array($this->getCurrency(), $this->supported_currency_list())){
-            return $this->is_decimal($amount) ? $amount : number_format((float)$amount,2,'.','');
+        if (in_array($this->getCurrency(), $this->supported_currency_list())) {
+            return $this->is_decimal($amount) ? $amount : number_format((float)$amount, 2, '.', '');
         }
-        return $this->is_decimal( $this->get_amount_in_usd($amount)) ? $this->get_amount_in_usd($amount) :number_format((float) $this->get_amount_in_usd($amount),2,'.','');
+        return $this->is_decimal($this->get_amount_in_usd($amount)) ? $this->get_amount_in_usd($amount) : number_format((float) $this->get_amount_in_usd($amount), 2, '.', '');
     }
 
 
-    protected function getPaymentProvider($args){
-        Config::set([
-            'paypal.mode'    => $this->getEnv() ? 'sandbox' : 'live',
-            'paypal.sandbox' => [
-                'client_id'         => $this->getClientId(),
-                'client_secret'     => $this->getClientSecret(),
-                'app_id'            => $this->getAppId(),
-            ],
-            'paypal.live' => [
-                'client_id'         => $this->getClientId(),
-                'client_secret'     => $this->getClientSecret(),
-                'app_id'            => $this->getAppId(),
-            ],
-            'paypal.payment_action' => 'Sale',
-            'paypal.currency'       => $this->charge_currency(),
-            'paypal.notify_url'     => $args['ipn_url'],
-            'paypal.locale'         => app()->getLocale(),
-            'paypal.validate_ssl'   => true,
-        ]);
-        $provider = new PayPalClient;
-        $access_token = $provider->getAccessToken();
+    protected function getPaymentProvider($args)
+    {
+        $environment = $this->getEnv()
+            ? new SandboxEnvironment($this->getClientId(), $this->getClientSecret())
+            : new ProductionEnvironment($this->getClientId(), $this->getClientSecret());
 
-        abort_if(isset($access_token['type'])  && $access_token['type'] === 'error',405,$access_token['message'] ?? '');
-        $provider->setAccessToken($access_token);
-        return $provider;
+        return new PayPalHttpClient($environment);
     }
     /**
      * @required param list
@@ -99,19 +89,21 @@ class PaypalPay extends PaymentGatewayBase
 
     public function charge_customer($args)
     {
-       $provider = $this->getPaymentProvider($args);
+        $provider = $this->getPaymentProvider($args);
 
-        if($args['amount'] < 1){
-            abort(500,__('minimum payable amount is 1'));
+        if ($args['amount'] < 1) {
+            abort(500, __('minimum payable amount is 1'));
         }
-        
-        $order = $provider->createOrder([
-            "intent"=> "CAPTURE",
-            "purchase_units"=> [
-                0 => [
-                    "amount"=> [
-                        "currency_code"=> $this->charge_currency(),
-                        "value"=> number_format($this->charge_amount($args['amount']), 2, ".", "")
+
+        $request = new OrdersCreateRequest();
+        $request->prefer('return=representation');
+        $request->body = [
+            "intent" => "CAPTURE",
+            "purchase_units" => [
+                [
+                    "amount" => [
+                        "currency_code" => $this->charge_currency(),
+                        "value" => number_format($this->charge_amount($args['amount']), 2, ".", "")
                     ]
                 ]
             ],
@@ -119,20 +111,29 @@ class PaypalPay extends PaymentGatewayBase
                 'cancel_url' => $args['cancel_url'],
                 'return_url' => $args['ipn_url']
             ]
-        ]);
+        ];
 
-        // throw exception
-        if(isset($order['error'])){
-            abort(422, $order['error']['message']);
+        try {
+            $response = $provider->execute($request);
+            $order = $response->result;
+
+            $order_id = $order->id;
+            session()->put('paypal_order_id', $order_id);
+            session()->put('paypal_ipn_url', $args['ipn_url']);
+            session()->put('paypal_cancel_url', $args['cancel_url']);
+            session()->put('script_order_id', $args['order_id']);
+
+            foreach ($order->links as $link) {
+                if ($link->rel === 'approve') {
+                    $redirect_url = $link->href;
+                    return redirect($redirect_url)->send();
+                }
+            }
+
+            abort(500, 'PayPal approval URL not found');
+        } catch (\Exception $e) {
+            abort(422, $e->getMessage());
         }
-        abort_if(isset($order['type'])  && $order['type'] === 'error',405,$order['message'] ?? '');
-        $order_id = $order['id'];
-        session()->put('paypal_order_id',$order_id);
-        session()->put('paypal_ipn_url',$args['ipn_url']);
-        session()->put('paypal_cancel_url',$args['cancel_url']);
-        session()->put('script_order_id', $args['order_id']);
-        $redirect_url = $order['links'][1]['href'];
-        return redirect($redirect_url)->send();
     }
 
 
@@ -144,7 +145,8 @@ class PaypalPay extends PaymentGatewayBase
      *
      * return @void
      * */
-    public function ipn_response($args = []){
+    public function ipn_response($args = [])
+    {
 
         /** Get the payment ID before session clear **/
         $payment_id = session()->get('paypal_order_id');
@@ -153,36 +155,45 @@ class PaypalPay extends PaymentGatewayBase
         $paypal_cancel_url = session()->get('paypal_cancel_url');
         $request = request();
         /** clear the session payment ID **/
-        session()->forget(['paypal_order_id','script_order_id','paypal_cancel_url','paypal_ipn_url']);
+        session()->forget(['paypal_order_id', 'script_order_id', 'paypal_cancel_url', 'paypal_ipn_url']);
 
         if (empty($request->get('PayerID')) || empty($request->get('token'))) {
             return abort(404);
         }
 
         $provider = $this->getPaymentProvider(['ipn_url' => $paypal_ipn_url]);
-        $order_details = $provider->showOrderDetails($payment_id);
-      
-        //dd($order_details);
-    
-      if (isset($order_details['status']) && $order_details['status'] === 'APPROVED') {
-          return $this->verified_data([
-                'status' => 'complete',
-              'transaction_id' => $payment_id,
-              'order_id' => $script_order_id
-          ]);
-      }
-    
-        return $this->verified_data([
-            'status' => 'pending',
-            'order_id' => $script_order_id
-        ]);
+
+        try {
+            $orderRequest = new OrdersGetRequest($payment_id);
+            $response = $provider->execute($orderRequest);
+            $order_details = $response->result;
+
+            if (isset($order_details->status) && $order_details->status === 'APPROVED') {
+                return $this->verified_data([
+                    'status' => 'complete',
+                    'transaction_id' => $payment_id,
+                    'order_id' => $script_order_id
+                ]);
+            }
+
+            return $this->verified_data([
+                'status' => 'pending',
+                'order_id' => $script_order_id
+            ]);
+        } catch (\Exception $e) {
+            return $this->verified_data([
+                'status' => 'failed',
+                'order_id' => $script_order_id
+            ]);
+        }
     }
 
     /**
      * geteway_name();
      * return @string
      * */
-    public function gateway_name(){
+    public function gateway_name()
+    {
         return 'paypal';
     }
     /**
@@ -191,7 +202,7 @@ class PaypalPay extends PaymentGatewayBase
      * */
     public function charge_currency()
     {
-        if (in_array($this->getCurrency(), $this->supported_currency_list())){
+        if (in_array($this->getCurrency(), $this->supported_currency_list())) {
             return $this->getCurrency();
         }
         return  "USD";
@@ -201,8 +212,9 @@ class PaypalPay extends PaymentGatewayBase
      * it will returl all of supported currency for the payment gateway
      * return array
      * */
-    public function supported_currency_list(){
-        return ['AUD','USD','EUR'];
+    public function supported_currency_list()
+    {
+        return ['AUD', 'USD', 'EUR'];
         //return ['AUD', 'BRL', 'CAD', 'CNY', 'CZK', 'DKK', 'EUR', 'HKD', 'HUF', 'INR', 'ILS', 'JPY', 'MYR', 'MXN', 'TWD', 'NZD', 'NOK', 'PHP', 'PLN', 'GBP', 'RUB', 'SGD', 'SEK', 'CHF', 'THB', 'USD'];
     }
 }

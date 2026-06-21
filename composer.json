@@ -23,26 +23,26 @@
     ],
     "homepage": "https://github.com/XgeniousLLC/paymentgateway",
     "require": {
-        "php": "^8.2",
-        "laravel/framework": "^12.13.0",
-        "stripe/stripe-php": "^13.10.0",
-        "srmklive/paypal": "~3.0",
-        "midtrans/midtrans-php": "^2.5",
+        "php": "^8.3",
+        "laravel/framework": "^13.4.0",
+        "stripe/stripe-php": "^20.0.0",
+        "paypal/paypal-checkout-sdk": "^1.0",
+        "midtrans/midtrans-php": "^2.6",
         "razorpay/razorpay": "2.*",
-        "mollie/laravel-mollie": "^3.1.0",
-        "mercadopago/dx-php":"^3.7.1",
-        "square/square": "37.1.0.20240604",
+        "mollie/laravel-mollie": "^4.1.0",
+        "mercadopago/dx-php": "^3.8.0",
+        "square/square": "45.0.0.20260122",
         "paytabscom/laravel_paytabs": "dev-master",
         "authorizenet/authorizenet": "^2.0",
         "psr/http-factory": "^1.1",
         "iyzico/iyzipay-php": "^2.0",
-        "stevebauman/location": "^7.1",
-        "yoomoney/yookassa-sdk-php": "^3.0"
+        "stevebauman/location": "^7.6.3",
+        "yoomoney/yookassa-sdk-php": "^3.13.1"
     },
     "require-dev": {
-        "phpunit/phpunit": "^11.0",
-        "orchestra/testbench": "^10.0.0",
-        "phpstan/phpstan": "^1.10"
+        "phpunit/phpunit": "^11.5.55",
+        "orchestra/testbench": "^11.1.0",
+        "phpstan/phpstan": "^2.1.46"
     },
     "license": "MIT",
     "autoload": {

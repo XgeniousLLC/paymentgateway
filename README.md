@@ -5,8 +5,8 @@ A Laravel package to manage multiple payment gateways with a unified API.
 - **Package:** `xgenious/paymentgateway`
 - **Author:** Sharifur Rahman
 - **License:** MIT
-- **PHP:** ^8.2
-- **Laravel:** ^12.x
+- **PHP:** ^8.3
+- **Laravel:** ^13.x
 
 ---
 
