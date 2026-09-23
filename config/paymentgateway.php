@@ -6,7 +6,11 @@ return [
     // Place your package's config settings here.
     'stripe' => [
         'secret_key' => env('STRIPE_SECRET_KEY',null),
-        'public_key' => env('STRIPE_PUBLIC_KEY',null)
+        'public_key' => env('STRIPE_PUBLIC_KEY',null),
+        'webhook_secret' => env('STRIPE_WEBHOOK_SECRET',null),
+        'recurring_interval' => env('STRIPE_RECURRING_INTERVAL','month'),
+        'recurring_interval_count' => env('STRIPE_RECURRING_INTERVAL_COUNT',1),
+        'connect_account_id' => env('STRIPE_CONNECT_ACCOUNT_ID',null),
     ],
     'paypal' =>[
         'mode'    => env('PAYPAL_MODE', 'sandbox'), // Can only be 'sandbox' Or 'live'. If empty or invalid, 'live' will be used.
