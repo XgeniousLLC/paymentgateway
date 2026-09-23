@@ -5,12 +5,14 @@ namespace Xgenious\Paymentgateway\Base\Gateways;
 
 use Illuminate\Support\Facades\Http;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Razorpay\Api\Api;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\IndianCurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 
-class RazorPay extends PaymentGatewayBase
+class RazorPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     use PaymentEnvironment, CurrencySupport, IndianCurrencySupport;
 
@@ -541,7 +543,46 @@ class RazorPay extends PaymentGatewayBase
     public function baseApi() {
         return 'https://api.razorpay.com/v1/';
     }
-    public function cancel_subscription($subscription_id, $cancel_at_cycle_end = false)
+    /**
+     * RecurringSupport: subscription checkout entry point.
+     * Accepts the same $args as charge_customer() plus optional plan_config:
+     * ['id','title','price','type','package_description','razorpay_plan_id'?]
+     * Without plan_config, builds a monthly plan from amount/title automatically.
+     */
+    public function charge_customer_recurring(array $args)
+    {
+        $args['is_subscription'] = true;
+        if (!isset($args['plan_config'])) {
+            $args['plan_config'] = [
+                'id' => $args['order_id'],
+                'title' => $args['title'] ?? 'Monthly Donation',
+                'price' => $args['amount'],
+                'type' => 0,
+                'package_description' => $args['description'] ?? 'Monthly subscription',
+            ];
+        }
+        return $this->charge_customer($args);
+    }
+
+    /**
+     * RecurringSupport: IPN handler for subscription callbacks.
+     * The standard ipn_response() already verifies both subscription
+     * and one-time callbacks, so this delegates to it.
+     */
+    public function ipn_response_recurring(array $args = [])
+    {
+        return $this->ipn_response($args);
+    }
+
+    /**
+     * SubscriptionLifecycle: cancel with the shared ($subscription_id, $at_period_end) signature.
+     */
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        return $this->cancel_subscription_request($subscription_id, $at_period_end);
+    }
+
+    private function cancel_subscription_request($subscription_id, $cancel_at_cycle_end = false)
     {
         abort_if(is_null($this->getApiKey()), 405, 'razorpay api key is missing');
         abort_if(is_null($this->getApiSecret()), 405, 'razorpay api secret is missing');
