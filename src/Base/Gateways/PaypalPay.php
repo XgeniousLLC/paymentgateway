@@ -5,12 +5,14 @@ namespace Xgenious\Paymentgateway\Base\Gateways;
 use Illuminate\Support\Facades\Config;
 use Xgenious\Paymentgateway\Base\GlobalCurrency;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Srmklive\PayPal\Services\PayPal as PayPalClient;
 use Xgenious\Paymentgateway\Traits\ConvertUsdSupport;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 
-class PaypalPay extends PaymentGatewayBase
+class PaypalPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     use PaymentEnvironment,CurrencySupport,ConvertUsdSupport;
     protected $client_id;
@@ -176,6 +178,169 @@ class PaypalPay extends PaymentGatewayBase
             'status' => 'pending',
             'order_id' => $script_order_id
         ]);
+    }
+
+    public function recurring_cycle($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        $unit = match($interval) {
+            'daily', 'day', 'days' => 'DAY',
+            'weekly', 'week', 'weeks' => 'WEEK',
+            'monthly', 'month', 'months' => 'MONTH',
+            'quarterly' => 'MONTH',
+            'biannually' => 'MONTH',
+            'yearly', 'annual', 'year', 'years' => 'YEAR',
+            default => 'MONTH',
+        };
+        $count = match($interval) {
+            'quarterly' => $interval_count * 3,
+            'biannually' => $interval_count * 6,
+            default => $interval_count,
+        };
+        return ['interval_unit' => $unit, 'interval_count' => $count];
+    }
+
+    public function getOrCreatePlan($plan_config, $provider = null)
+    {
+        if (!empty($plan_config['paypal_plan_id'])) {
+            return ['status' => 'success', 'plan_id' => $plan_config['paypal_plan_id'], 'created' => false];
+        }
+        $provider = $provider ?: $this->getPaymentProvider(['ipn_url' => '']);
+        $cycle = $this->recurring_cycle($plan_config['interval'] ?? 'monthly', $plan_config['interval_count'] ?? 1);
+        $amount = number_format((float) $this->charge_amount($plan_config['price'] ?? $plan_config['amount'] ?? 0), 2, '.', '');
+        $product = $provider->createProduct([
+            'name' => $plan_config['title'] ?? 'Recurring Plan',
+            'type' => 'SERVICE',
+        ]);
+        if (empty($product['id'])) {
+            return ['status' => 'failed', 'message' => $product['message'] ?? 'Failed to create PayPal product.'];
+        }
+        $plan = $provider->createPlan([
+            'product_id' => $product['id'],
+            'name' => $plan_config['title'] ?? 'Recurring Plan',
+            'description' => $plan_config['description'] ?? ($plan_config['title'] ?? 'Recurring Plan'),
+            'billing_cycles' => [[
+                'frequency' => $cycle,
+                'tenure_type' => 'REGULAR',
+                'sequence' => 1,
+                'total_cycles' => 0,
+                'pricing_scheme' => ['fixed_price' => ['value' => $amount, 'currency_code' => $this->charge_currency()]],
+            ]],
+            'payment_preferences' => [
+                'auto_bill_outstanding' => true,
+                'payment_failure_threshold' => 3,
+            ],
+        ]);
+        if (empty($plan['id'])) {
+            return ['status' => 'failed', 'message' => $plan['message'] ?? 'Failed to create PayPal plan.'];
+        }
+        return ['status' => 'success', 'plan_id' => $plan['id'], 'created' => true, 'plan_data' => $plan];
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        $provider = $this->getPaymentProvider($args);
+        $plan_config = $args['plan_config'] ?? [
+            'title' => $args['title'] ?? 'Monthly Donation',
+            'price' => $args['amount'],
+            'description' => $args['description'] ?? ($args['title'] ?? 'Monthly subscription'),
+            'interval' => $args['recurring_interval'] ?? 'monthly',
+            'interval_count' => $args['recurring_interval_count'] ?? 1,
+        ];
+        $plan = $this->getOrCreatePlan($plan_config, $provider);
+        if ($plan['status'] !== 'success') {
+            throw new \RuntimeException('PayPal plan error: ' . ($plan['message'] ?? 'unknown'));
+        }
+        $subscription = $provider->createSubscription([
+            'plan_id' => $plan['plan_id'],
+            'custom_id' => (string) ($args['order_id'] ?? ''),
+            'application_context' => [
+                'brand_name' => $args['title'] ?? 'Subscription',
+                'cancel_url' => $args['cancel_url'],
+                'return_url' => $args['ipn_url'],
+                'user_action' => 'SUBSCRIBE_NOW',
+            ],
+        ]);
+        if (empty($subscription['id'])) {
+            throw new \RuntimeException('PayPal subscription error: ' . ($subscription['message'] ?? 'unknown'));
+        }
+        $approve = collect($subscription['links'] ?? [])->firstWhere('rel', 'approve');
+        session()->put('paypal_subscription_id', $subscription['id']);
+        session()->put('paypal_plan_id', $plan['plan_id']);
+        session()->put('script_order_id', $args['order_id']);
+        session()->put('paypal_is_subscription', true);
+        if (!empty($approve['href'])) {
+            return redirect($approve['href'])->send();
+        }
+        throw new \RuntimeException('PayPal subscription approval URL missing.');
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        $subscription_id = session()->pull('paypal_subscription_id');
+        $order_id = session()->pull('script_order_id');
+        session()->forget(['paypal_plan_id', 'paypal_is_subscription']);
+        $token = request()->get('subscription_id') ?? $subscription_id;
+        if (empty($token)) {
+            return ['status' => 'failed', 'order_id' => $order_id];
+        }
+        $provider = $this->getPaymentProvider(['ipn_url' => '']);
+        $details = $provider->showSubscriptionDetails($token);
+        if (in_array($details['status'] ?? '', ['ACTIVE', 'APPROVED', 'APPROVAL_PENDING'], true)) {
+            return $this->verified_data([
+                'transaction_id' => $token,
+                'order_id' => $order_id,
+                'paypal_subscription_id' => $token,
+                'subscription_status' => $details['status'] ?? 'ACTIVE',
+                'is_recurring' => true,
+            ]);
+        }
+        return ['status' => 'failed', 'order_id' => $order_id];
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        try {
+            $provider = $this->getPaymentProvider(['ipn_url' => '']);
+            $provider->cancelSubscription($subscription_id, 'Cancelled by donor');
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        try {
+            $provider = $this->getPaymentProvider(['ipn_url' => '']);
+            $provider->suspendSubscription($subscription_id, 'Paused by donor');
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        try {
+            $provider = $this->getPaymentProvider(['ipn_url' => '']);
+            $provider->activateSubscription($subscription_id, 'Resumed by donor');
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        try {
+            $provider = $this->getPaymentProvider(['ipn_url' => '']);
+            $details = $provider->showSubscriptionDetails($subscription_id);
+            return ['status' => 'success', 'subscription_data' => $details];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
     }
 
     /**

@@ -5,10 +5,12 @@ namespace Xgenious\Paymentgateway\Base\Gateways;
 use Illuminate\Support\Str;
 use Xgenious\Paymentgateway\Base\GlobalCurrency;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 
-class MidtransPay extends PaymentGatewayBase
+class MidtransPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     use PaymentEnvironment,CurrencySupport;
 
@@ -198,5 +200,142 @@ class MidtransPay extends PaymentGatewayBase
         \Midtrans\Config::$paymentIdempotencyKey = $args['order_id'];
     }
 
+    public function recurring_schedule($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        $unit = match($interval) {
+            'daily', 'day', 'days' => 'day',
+            'weekly', 'week', 'weeks' => 'week',
+            'monthly', 'month', 'months' => 'month',
+            'quarterly' => 'month',
+            'biannually' => 'month',
+            'yearly', 'annual', 'year', 'years' => 'month',
+            default => 'month',
+        };
+        $count = match($interval) {
+            'quarterly' => $interval_count * 3,
+            'biannually' => $interval_count * 6,
+            'yearly', 'annual', 'year', 'years' => $interval_count * 12,
+            default => $interval_count,
+        };
+        return ['interval_unit' => $unit, 'interval' => $count];
+    }
 
+    public function charge_customer_recurring(array $args)
+    {
+        $order_id = random_int(12345,99999).$args['order_id'].random_int(12345,99999);
+        $this->setConfig(['order_id' => $order_id, 'ipn_url' => $args['ipn_url']]);
+        $schedule = $this->recurring_schedule($args['recurring_interval'] ?? 'monthly', $args['recurring_interval_count'] ?? 1);
+        $name = trim($args['name'] ?? '');
+        $parts = explode(' ', $name, 2);
+        try {
+            $subscription = \Midtrans\CoreApi::createSubscription([
+                'name' => 'SUB-' . $args['order_id'] . '-' . time(),
+                'amount' => (string) ceil($this->charge_amount($args['amount'])),
+                'currency' => 'IDR',
+                'payment_type' => 'credit_card',
+                'token' => $args['card_token'] ?? '',
+                'schedule' => [
+                    'interval' => $schedule['interval'],
+                    'interval_unit' => $schedule['interval_unit'],
+                    'max_interval' => 0,
+                    'start_time' => gmdate('Y-m-d H:i:s O', time() + 60),
+                ],
+                'metadata' => ['order_id' => $args['order_id'], 'track' => $args['track'] ?? ''],
+                'customer_details' => [
+                    'first_name' => $parts[0] ?? 'Donor',
+                    'last_name' => $parts[1] ?? '',
+                    'email' => $args['email'] ?? '',
+                    'phone' => $args['phone'] ?? '',
+                ],
+            ]);
+        } catch (\Exception $e) {
+            abort(500, $e->getMessage());
+        }
+        session()->put('midtrans_subscription_id', $subscription->id ?? null);
+        session()->put('midtrans_last_order_id', $order_id);
+        $redirect = $subscription->redirect_url ?? null;
+        if ($redirect) {
+            return redirect()->away($redirect);
+        }
+        return redirect($args['ipn_url']);
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        $subscription_id = session()->pull('midtrans_subscription_id');
+        $midtrans_last_order_id = session()->get('midtrans_last_order_id');
+        session()->forget('midtrans_last_order_id');
+        if (empty($midtrans_last_order_id)) {
+            abort(405, 'midtrans order missing');
+        }
+        $this->setConfig(['order_id' => $midtrans_last_order_id, 'ipn_url' => $args['ipn_url'] ?? '']);
+        try {
+            $subscription = \Midtrans\CoreApi::getSubscription($subscription_id);
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'order_id' => substr($midtrans_last_order_id, 5, -5)];
+        }
+        if (in_array($subscription->status ?? '', ['active', 'pending'], true)) {
+            return $this->verified_data([
+                'transaction_id' => $subscription_id,
+                'order_id' => substr($midtrans_last_order_id, 5, -5),
+                'midtrans_subscription_id' => $subscription_id,
+                'subscription_status' => $subscription->status,
+                'is_recurring' => true,
+            ]);
+        }
+        return ['status' => 'failed', 'order_id' => substr($midtrans_last_order_id, 5, -5)];
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        $this->setConfig(['order_id' => $subscription_id, 'ipn_url' => '']);
+        try {
+            \Midtrans\CoreApi::disableSubscription($subscription_id);
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        return $this->cancel_subscription($subscription_id, false);
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        $this->setConfig(['order_id' => $subscription_id, 'ipn_url' => '']);
+        try {
+            \Midtrans\CoreApi::enableSubscription($subscription_id);
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        $this->setConfig(['order_id' => $subscription_id, 'ipn_url' => '']);
+        try {
+            $subscription = \Midtrans\CoreApi::getSubscription($subscription_id);
+            return ['status' => 'success', 'subscription_data' => (array) $subscription];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function verify_webhook_signature($payload, $signature)
+    {
+        if (empty($this->getServerKey()) || empty($signature)) {
+            return false;
+        }
+        $data = is_string($payload) ? json_decode($payload, true) : (array) $payload;
+        if (empty($data['order_id']) || empty($data['status_code']) || empty($data['gross_amount'])) {
+            return false;
+        }
+        $expected = hash('sha512', $data['order_id'] . $data['status_code'] . $data['gross_amount'] . $this->getServerKey());
+        return hash_equals($expected, (string) $signature);
+    }
 }

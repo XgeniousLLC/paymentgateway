@@ -21,30 +21,28 @@ Razorpay additionally accepts `plan_config` (`id,title,price,type,package_descri
 | Region | Gateway | Currency | Recurring | Notes |
 |---|---|---|---|---|
 | Global | **Stripe** | 135+ (USD,EUR,GBP,...) | ✅ native Billing subscriptions | Checkout `mode=subscription`; webhooks via `construct_webhook_event()`; Connect express + `subscription_data.transfer_data` / `application_fee_percent` in subscription mode (`payment_intent_data` in one-time mode) |
+| Global | **PayPal** | AUD,USD,EUR | ✅ Catalog product + billing plan + subscription | Approve via `approve` link; `activate/suspend` map to resume/pause; cancel at gateway |
 | India | **Razorpay** | INR | ✅ native Subscriptions | Dynamic plan create/reuse; `pause/resume/cancel/fetch`; webhook secret verify |
-| India | Paytm | INR | ➖ one-time only | Keep email-reminder fallback |
-| India | Cashfree | INR | ➖ one-time only | Subscriptions API not wrapped yet |
-| India | Instamojo | INR | ➖ one-time only | No subscription API in package |
-| Africa | Paystack | NGN,GHS,ZAR... | 🔶 provider supports, not wrapped | Next candidate: wrap `/subscription` + webhook `charge.success` |
-| Africa | Flutterwave | NGN + 30 | 🔶 provider supports, not wrapped | Next candidate: wrap payment-plans API |
-| Africa | Payfast | ZAR | 🔶 recurring billing exists upstream | Needs ITN-based recurring wrapper |
-| Africa | CinetPay | XOF,XAF | ➖ one-time only |  |
-| EU/UK | Mollie | EUR+ | 🔶 Sequences API exists upstream | Needs mandates + `ipn_response_recurring` wrapper |
-| EU/UK | Adyen | 150+ | 🔶 tokenized recurring upstream | Needs wrapper |
-| LATAM | MercadoPago | BRL,ARS... | 🔶 preapproval API upstream | Needs wrapper |
-| SEA | Midtrans | IDR | ➖ one-time only |  |
-| SEA | Xendit | IDR,MYR,PHP,THB,VND | 🔶 recurring plans upstream | Needs wrapper |
-| SEA | BillPlz | MYR | ➖ one-time only |  |
-| SEA | Toyyibpay | MYR | ➖ one-time only |  |
-| SEA | Senangpay | MYR | ✅ native recurring URL flow | Implements `RecurringSupport` |
-| MENA | PayTabs | AED,SAR,... | 🔶 tokenize + recurring upstream | Needs wrapper |
-| MENA | Paymob | EGP + | ➖ one-time only |  |
-| US | PayPal | 25+ | 🔶 Billing Plans upstream | Needs wrapper |
-| US | Authorize.Net | USD | 🔶 ARB upstream | Needs wrapper |
-| US | Square | USD+ | 🔶 subscriptions upstream | Needs wrapper |
-| TR | Iyzipay | TRY | 🔶 subscription upstream | Needs wrapper |
-| BD | SSLCommerz | BDT | ➖ one-time only |  |
-| RU/CIS | YooMoney | RUB | ➖ one-time only |  |
+| India | **Paytm** | INR | ✅ Subscriptions (PPR params on init) | Frequency unit mapping; cancel/status via checksum-signed calls |
+| India | **Cashfree** | INR | ✅ Subscriptions API (UPI Autopay/eNACH/cards) | `pause/resume/cancel/fetch`; webhook HMAC verify |
+| India | Instamojo | INR | ➖ one-time only | Provider exposes payment links only, no subscription API |
+| Africa | **Paystack** | NGN,GHS,ZAR | ✅ Plans + auto-charge on init with plan code | Webhook HMAC-SHA512 verify; disable/enable map to cancel/resume |
+| Africa | **Flutterwave** | NGN + 30 | ✅ Payment Plans API | Pass `payment_plan` id on checkout; secret-hash webhook verify |
+| Africa | **Payfast** | ZAR | ✅ Recurring billing fields on checkout | `subscription_type` + billing date; lifecycle managed in PayFast dashboard (no API) |
+| EU/UK | **Mollie** | EUR+ | ✅ Customers + mandates + Subscriptions API | First payment creates mandate, subscription chained on IPN; cancel needs customer id |
+| US | **Authorize.Net** | USD+ | ✅ ARB subscriptions | Card via Accept.js opaque data or raw fields; cancel/fetch via ARB API |
+| US | **Square** | USD+ | ✅ Catalog plan + card-on-file subscription | Needs `square_customer_id` + `square_card_id` from Web Payments SDK; pause/resume/cancel/fetch |
+| LATAM | **MercadoPago** | BRL,ARS... | ✅ Preapproval plans | Plan + preapproval checkout; pause/resume/cancel via status update |
+| SEA | **Midtrans** | IDR | ✅ Subscription API (Core API `createSubscription`) | Needs `card_token` from Snap/GoPay tokenization; enable/disable map to resume/cancel |
+| SEA | **Xendit** | IDR,MYR,PHP,THB,VND | ✅ Recurring payments API | `pause/resume/stop/fetch`; callback-token webhook verify |
+| SEA | BillPlz | MYR | ➖ one-time only | No provider recurring |
+| SEA | Toyyibpay | MYR | ➖ one-time only | No provider recurring |
+| SEA | **Senangpay** | MYR | ✅ native recurring URL flow | Implements `RecurringSupport` |
+| MENA | **PayTabs** | AED,SAR,... | ✅ Tokenized recurring (`tran_class=recurring`) | First checkout tokenizes; renewals via `charge_saved_token()`; app-scheduled |
+| MENA | Paymob | EGP + | ➖ one-time only | No wrapper yet (Moto/token API exists upstream) |
+| TR | Iyzipay | TRY | ➖ one-time only | No subscription API surfaced |
+| BD | SSLCommerz | BDT | ➖ one-time only | No provider recurring |
+| RU/CIS | YooMoney | RUB | ➖ one-time only | No wrapper yet |
 
 Legend: ✅ wrapped + tested interface · 🔶 provider has API, package wrapper pending · ➖ no provider recurring.
 

@@ -3,6 +3,8 @@
 namespace Xgenious\Paymentgateway\Base\Gateways;
 
 use  Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Square\SquareClient;
 use Square\Environment;
 use Square\Exceptions\ApiException;
@@ -14,7 +16,7 @@ use Square\Models\OrderLineItem;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 
-class SquarePay extends PaymentGatewayBase
+class SquarePay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
 
     use PaymentEnvironment, CurrencySupport;
@@ -194,6 +196,175 @@ class SquarePay extends PaymentGatewayBase
             'environment' => $this->getEnv() ? 'sandbox' : 'production', //Environment::PRODUCTION,
         ]);
         return $client;
+    }
+
+    public function recurring_cadence($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        $name = match($interval) {
+            'daily', 'day', 'days' => 'DAILY',
+            'weekly', 'week', 'weeks' => 'WEEKLY',
+            'monthly', 'month', 'months' => 'EVERY_MONTH',
+            'quarterly' => 'EVERY_THREE_MONTHS',
+            'biannually' => 'EVERY_SIX_MONTHS',
+            'yearly', 'annual', 'year', 'years' => 'ANNUAL',
+            default => 'EVERY_MONTH',
+        };
+        $count = match($interval) {
+            'daily', 'day', 'days' => $interval_count,
+            'weekly', 'week', 'weeks' => $interval_count,
+            'monthly', 'month', 'months' => $interval_count,
+            default => 1,
+        };
+        return ['name' => $name, 'count' => $count];
+    }
+
+    public function getOrCreatePlan($plan_config, $client = null)
+    {
+        if (!empty($plan_config['square_plan_id']) && !empty($plan_config['square_variation_id'])) {
+            return ['status' => 'success', 'plan_id' => $plan_config['square_plan_id'], 'variation_id' => $plan_config['square_variation_id'], 'created' => false];
+        }
+        $client = $client ?: $this->setConfig();
+        $cadence = $this->recurring_cadence($plan_config['interval'] ?? 'monthly', $plan_config['interval_count'] ?? 1);
+        $amount = (int) round($this->charge_amount($plan_config['price'] ?? $plan_config['amount'] ?? 0));
+        try {
+            $money = new \Square\Models\Money();
+            $money->setCurrency($this->charge_currency());
+            $money->setAmount($amount);
+            $phase = new \Square\Models\SubscriptionPhase();
+            $phase->setCadence($cadence['name']);
+            $phase->setRecurringPriceMoney($money);
+            $planData = new \Square\Models\CatalogSubscriptionPlan();
+            $planData->setName($plan_config['title'] ?? 'Recurring Plan');
+            $planData->setPhases([$phase]);
+            $catalogObject = new \Square\Models\CatalogObject('SUBSCRIPTION_PLAN', '#' . uniqid('plan_'));
+            $catalogObject->setSubscriptionPlanData($planData);
+            $upsert = new \Square\Models\UpsertCatalogObjectRequest(uniqid(), $catalogObject);
+            $response = $client->getCatalogApi()->upsertCatalogObject($upsert);
+            if ($response->isError()) {
+                $errors = array_map(fn($e) => $e->getDetail(), $response->getErrors());
+                return ['status' => 'failed', 'message' => implode('; ', $errors)];
+            }
+            $object = $response->getResult()->getCatalogObject();
+            $variations = $object->getSubscriptionPlanData()->getSubscriptionPlanVariations() ?? [];
+            $variation_id = !empty($variations) ? $variations[0]->getId() : null;
+            if (empty($variation_id)) {
+                return ['status' => 'failed', 'message' => 'Square plan variation missing.'];
+            }
+            return ['status' => 'success', 'plan_id' => $object->getId(), 'variation_id' => $variation_id, 'created' => true];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        // Square subscriptions charge a card on file: collect the card via the
+        // standard checkout first is out of scope here; the app must pass
+        // customer_id + card_id obtained from the Web Payments SDK.
+        if (empty($args['square_customer_id']) || empty($args['square_card_id'])) {
+            throw new \RuntimeException('Square recurring requires square_customer_id and square_card_id (collect via Web Payments SDK first).');
+        }
+        $client = $this->setConfig();
+        $plan_config = $args['plan_config'] ?? [
+            'title' => $args['title'] ?? 'Monthly Donation',
+            'price' => $args['amount'],
+            'interval' => $args['recurring_interval'] ?? 'monthly',
+            'interval_count' => $args['recurring_interval_count'] ?? 1,
+        ];
+        $plan = $this->getOrCreatePlan($plan_config, $client);
+        if ($plan['status'] !== 'success') {
+            throw new \RuntimeException('Square plan error: ' . ($plan['message'] ?? 'unknown'));
+        }
+        try {
+            $request = new \Square\Models\CreateSubscriptionRequest($args['square_customer_id']);
+            $request->setLocationId($this->getLocationId());
+            $request->setPlanVariationId($plan['variation_id']);
+            $request->setCardId($args['square_card_id']);
+            $response = $client->getSubscriptionsApi()->createSubscription($request);
+            if ($response->isError()) {
+                $errors = array_map(fn($e) => $e->getDetail(), $response->getErrors());
+                throw new \RuntimeException(implode('; ', $errors));
+            }
+            $subscription = $response->getResult()->getSubscription();
+            return $this->verified_data([
+                'transaction_id' => $subscription->getId(),
+                'order_id' => $args['order_id'],
+                'square_subscription_id' => $subscription->getId(),
+                'subscription_status' => $subscription->getStatus(),
+                'is_recurring' => true,
+            ]);
+        } catch (ApiException $e) {
+            throw new \RuntimeException('Square subscription failed: ' . $e->getMessage());
+        }
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        // Square card-on-file subscriptions return synchronously from
+        // charge_customer_recurring(); the webhook path reuses order lookup.
+        return $this->ipn_response($args);
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        try {
+            $response = $this->setConfig()->getSubscriptionsApi()->cancelSubscription($subscription_id);
+            if ($response->isError()) {
+                $errors = array_map(fn($e) => $e->getDetail(), $response->getErrors());
+                return ['status' => 'failed', 'message' => implode('; ', $errors)];
+            }
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        try {
+            $request = new \Square\Models\PauseSubscriptionRequest();
+            $request->setPauseCycleDuration(1);
+            $request->setPauseEffectiveDate(gmdate('Y-m-d'));
+            $response = $this->setConfig()->getSubscriptionsApi()->pauseSubscription($subscription_id, $request);
+            if ($response->isError()) {
+                $errors = array_map(fn($e) => $e->getDetail(), $response->getErrors());
+                return ['status' => 'failed', 'message' => implode('; ', $errors)];
+            }
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        try {
+            $request = new \Square\Models\ResumeSubscriptionRequest();
+            $response = $this->setConfig()->getSubscriptionsApi()->resumeSubscription($subscription_id, $request);
+            if ($response->isError()) {
+                $errors = array_map(fn($e) => $e->getDetail(), $response->getErrors());
+                return ['status' => 'failed', 'message' => implode('; ', $errors)];
+            }
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        try {
+            $response = $this->setConfig()->getSubscriptionsApi()->retrieveSubscription($subscription_id);
+            if ($response->isError()) {
+                $errors = array_map(fn($e) => $e->getDetail(), $response->getErrors());
+                return ['status' => 'failed', 'message' => implode('; ', $errors)];
+            }
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id, 'status' => $response->getResult()->getSubscription()->getStatus()]];
+        } catch (\Exception $e) {
+            return ['status' => 'failed', 'message' => $e->getMessage()];
+        }
     }
 
     /**

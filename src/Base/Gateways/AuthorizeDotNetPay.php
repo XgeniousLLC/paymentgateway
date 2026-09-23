@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Session;
 use Xgenious\Paymentgateway\Base\GlobalCurrency;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Srmklive\PayPal\Services\PayPal as PayPalClient;
 use Xgenious\Paymentgateway\Base\PaymentGatewayHelpers;
 use Xgenious\Paymentgateway\Traits\ConvertUsdSupport;
@@ -15,7 +17,7 @@ use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 use net\authorize\api\contract\v1 as AnetAPI;
 use net\authorize\api\controller as AnetController;
 
-class AuthorizeDotNetPay extends PaymentGatewayBase
+class AuthorizeDotNetPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     use PaymentEnvironment,CurrencySupport,ConvertUsdSupport;
     protected $merchant_login_id;
@@ -228,6 +230,144 @@ class AuthorizeDotNetPay extends PaymentGatewayBase
     public function gateway_name(){
         return 'authorizenet';
     }
+
+    private function merchant_auth()
+    {
+        $merchantAuthentication = new AnetAPI\MerchantAuthenticationType();
+        $merchantAuthentication->setName($this->getMerchantLoginId());
+        $merchantAuthentication->setTransactionKey($this->getMerchantTransactionId());
+        return $merchantAuthentication;
+    }
+
+    private function arb_environment()
+    {
+        return $this->getEnv()
+            ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
+            : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
+    }
+
+    public function recurring_schedule($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        // ARB supports months (1-12) and days (7-365).
+        return match($interval) {
+            'daily', 'day', 'days' => ['unit' => 'days', 'length' => max(7, $interval_count)],
+            'weekly', 'week', 'weeks' => ['unit' => 'days', 'length' => max(7, $interval_count * 7)],
+            'monthly', 'month', 'months' => ['unit' => 'months', 'length' => min(12, $interval_count)],
+            'quarterly' => ['unit' => 'months', 'length' => min(12, $interval_count * 3)],
+            'biannually' => ['unit' => 'months', 'length' => min(12, $interval_count * 6)],
+            'yearly', 'annual', 'year', 'years' => ['unit' => 'months', 'length' => 12],
+            default => ['unit' => 'months', 'length' => 1],
+        };
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        // ARB needs card details collected via Accept.js opaque data or raw card fields.
+        $opaque = $args['opaque_data_value'] ?? null;
+        $card_number = $args['card_number'] ?? null;
+        if (empty($opaque) && empty($card_number)) {
+            throw new \RuntimeException('Authorize.Net recurring requires card details (opaque_data_value or card_number/expiry/cvc).');
+        }
+        $schedule = $this->recurring_schedule($args['recurring_interval'] ?? 'monthly', $args['recurring_interval_count'] ?? 1);
+        $interval = new AnetAPI\PaymentScheduleType\IntervalAType();
+        $interval->setLength($schedule['length']);
+        $interval->setUnit($schedule['unit']);
+        $payment_schedule = new AnetAPI\PaymentScheduleType();
+        $payment_schedule->setInterval($interval);
+        $payment_schedule->setStartDate(new \DateTime('+1 day'));
+        $payment_schedule->setTotalOccurrences(9999);
+        if (!empty($opaque)) {
+            $opaque_data = new AnetAPI\OpaqueDataType();
+            $opaque_data->setDataDescriptor($args['opaque_data_descriptor'] ?? 'COMMON.ACCEPT.INAPP.PAYMENT');
+            $opaque_data->setDataValue($opaque);
+            $payment = new AnetAPI\PaymentType();
+            $payment->setOpaqueData($opaque_data);
+        } else {
+            $expiry = explode('/', $args['card_expiry'] ?? '');
+            $month = trim($expiry[0] ?? '');
+            $year = trim($expiry[1] ?? '');
+            $year = strlen($year) === 4 ? $year : ('20' . $year);
+            $creditCard = new AnetAPI\CreditCardType();
+            $creditCard->setCardNumber(preg_replace('/\s+/', '', $card_number));
+            $creditCard->setExpirationDate($year . '-' . $month);
+            $creditCard->setCardCode($args['card_cvc'] ?? '');
+            $payment = new AnetAPI\PaymentType();
+            $payment->setCreditCard($creditCard);
+        }
+        $subscription = new AnetAPI\ARBSubscriptionType();
+        $subscription->setName(substr($args['title'] ?? 'Subscription', 0, 50));
+        $subscription->setPaymentSchedule($payment_schedule);
+        $subscription->setAmount($this->charge_amount($args['amount']));
+        $subscription->setPayment($payment);
+        $subscription->setOrder(new AnetAPI\OrderType());
+        $subscription->getOrder()->setInvoiceNumber(substr((string) ($args['order_id'] ?? time()), 0, 20));
+        $request = new AnetAPI\ARBCreateSubscriptionRequest();
+        $request->setMerchantAuthentication($this->merchant_auth());
+        $request->setRefId('ref' . time());
+        $request->setSubscription($subscription);
+        $controller = new AnetController\ARBCreateSubscriptionController($request);
+        $response = $controller->executeWithApiResponse($this->arb_environment());
+        if ($response && $response->getMessages()->getResultCode() === 'Ok') {
+            $subscription_id = $response->getSubscriptionId();
+            return $this->verified_data([
+                'transaction_id' => $subscription_id,
+                'order_id' => $args['order_id'],
+                'authorizenet_subscription_id' => $subscription_id,
+                'subscription_status' => 'active',
+                'is_recurring' => true,
+            ]);
+        }
+        $message = $response ? $response->getMessages()->getMessage()[0]->getText() : 'ARB creation failed.';
+        throw new \RuntimeException('Authorize.Net subscription failed: ' . $message);
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        return $this->ipn_response($args);
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        $request = new AnetAPI\ARBCancelSubscriptionRequest();
+        $request->setMerchantAuthentication($this->merchant_auth());
+        $request->setRefId('ref' . time());
+        $request->setSubscriptionId($subscription_id);
+        $controller = new AnetController\ARBCancelSubscriptionController($request);
+        $response = $controller->executeWithApiResponse($this->arb_environment());
+        if ($response && $response->getMessages()->getResultCode() === 'Ok') {
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id]];
+        }
+        $message = $response ? $response->getMessages()->getMessage()[0]->getText() : 'ARB cancel failed.';
+        return ['status' => 'failed', 'message' => $message];
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'Authorize.Net ARB has no pause; cancel and recreate instead.'];
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'Authorize.Net ARB has no resume; create a new subscription instead.'];
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        $request = new AnetAPI\ARBGetSubscriptionRequest();
+        $request->setMerchantAuthentication($this->merchant_auth());
+        $request->setRefId('ref' . time());
+        $request->setSubscriptionId($subscription_id);
+        $controller = new AnetController\ARBGetSubscriptionController($request);
+        $response = $controller->executeWithApiResponse($this->arb_environment());
+        if ($response && $response->getMessages()->getResultCode() === 'Ok') {
+            return ['status' => 'success', 'subscription_data' => ['id' => $subscription_id, 'status' => $response->getSubscription()->getStatus()]];
+        }
+        $message = $response ? $response->getMessages()->getMessage()[0]->getText() : 'ARB fetch failed.';
+        return ['status' => 'failed', 'message' => $message];
+    }
+
     /**
      * charge_currency();
      * return @string

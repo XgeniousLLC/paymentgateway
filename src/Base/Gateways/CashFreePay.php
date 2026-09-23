@@ -3,6 +3,8 @@
 namespace Xgenious\Paymentgateway\Base\Gateways;
 use Xgenious\Paymentgateway\Base\GlobalCurrency;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\IndianCurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
@@ -11,7 +13,7 @@ use Xgenious\Paymentgateway\Base\PaymentGatewayHelpers;
 use Xgenious\Paymentgateway\Models\PaymentMeta;
 use Illuminate\Support\Str;
 
-class CashFreePay extends PaymentGatewayBase
+class CashFreePay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     use IndianCurrencySupport, CurrencySupport, PaymentEnvironment;
 
@@ -212,7 +214,144 @@ class CashFreePay extends PaymentGatewayBase
             "customer_email" => $args["email"],
             "customer_name" => $args["name"],
         ]);
-      
+
         return $req->ok() ? $req->object() : null;
+    }
+
+    public function recurring_frequency($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        $unit = match($interval) {
+            'daily', 'day', 'days' => 'daily',
+            'weekly', 'week', 'weeks' => 'weekly',
+            'monthly', 'month', 'months' => 'monthly',
+            'quarterly' => 'quarterly',
+            'biannually' => 'halfyearly',
+            'yearly', 'annual', 'year', 'years' => 'yearly',
+            default => 'monthly',
+        };
+        $count = match($interval) {
+            'quarterly' => $interval_count * 3,
+            'biannually' => $interval_count * 6,
+            default => $interval_count,
+        };
+        return ['unit' => $unit, 'count' => $count];
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        $customer_details = $this->getCustomerDetails($args);
+        $amount = $this->charge_amount($args['amount']);
+        $subscription_id = 'SUB_' . uniqid() . '_' . $args['order_id'];
+        $freq = $this->recurring_frequency($args['recurring_interval'] ?? 'monthly', $args['recurring_interval_count'] ?? 1);
+        $data = [
+            'subscription_id' => $subscription_id,
+            'customer_details' => [
+                'customer_id' => $customer_details->customer_uid ?? ('cust_' . $args['order_id']),
+                'customer_name' => $args['name'],
+                'customer_email' => $args['email'],
+                'customer_phone' => $args['phone'] ?? '9999999999',
+            ],
+            'subscription_meta' => [
+                'return_url' => $args['ipn_url'] . (strpos($args['ipn_url'], '?') !== false ? '&' : '?') . 'subscription_id=' . $subscription_id,
+                'subscription_note' => $args['description'] ?? $args['title'] ?? 'Subscription',
+            ],
+            'subscription_plan' => [
+                'plan_name' => $args['title'] ?? 'Monthly Plan',
+                'plan_type' => 'PERIODIC',
+                'plan_amount' => (float) $amount,
+                'plan_currency' => 'INR',
+                'plan_max_amount' => (float) $amount,
+                'plan_max_cycles' => 0,
+                'plan_frequency' => $freq['unit'],
+                'plan_frequency_interval' => $freq['count'],
+            ],
+        ];
+        $req = Http::withHeaders($this->getHeaders())->post($this->get_api_url() . '/pg/subscriptions', $data);
+        if ($req->ok()) {
+            $result = $req->object();
+            session()->put('cashfree_subscription_id', $result->subscription_id ?? $subscription_id);
+            session()->put('cashfree_order_id', $args['order_id']);
+            $auth_link = $result->auth_link ?? null;
+            if ($auth_link) {
+                return redirect()->away($auth_link);
+            }
+        }
+        abort(500, 'cashfree subscription api error');
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        $subscription_id = request()->get('subscription_id') ?? session()->pull('cashfree_subscription_id');
+        $order_id = session()->pull('cashfree_order_id');
+        if (empty($subscription_id)) {
+            return ['status' => 'failed', 'order_id' => $order_id];
+        }
+        $req = Http::withHeaders($this->getHeaders())->get($this->get_api_url() . '/pg/subscriptions/' . $subscription_id);
+        if ($req->ok()) {
+            $result = $req->object();
+            if (in_array($result->subscription_status ?? '', ['ACTIVE', 'COMPLETED'], true)) {
+                return $this->verified_data([
+                    'transaction_id' => $subscription_id,
+                    'order_id' => $order_id,
+                    'cashfree_subscription_id' => $subscription_id,
+                    'subscription_status' => $result->subscription_status,
+                    'is_recurring' => true,
+                ]);
+            }
+        }
+        return ['status' => 'failed', 'order_id' => $order_id];
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        $req = Http::withHeaders($this->getHeaders())->post(
+            $this->get_api_url() . '/pg/subscriptions/' . $subscription_id . '/cancel'
+        );
+        if ($req->ok()) {
+            return ['status' => 'success', 'subscription_data' => (array) $req->object()];
+        }
+        return ['status' => 'failed', 'message' => 'Failed to cancel Cashfree subscription.'];
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        $req = Http::withHeaders($this->getHeaders())->post(
+            $this->get_api_url() . '/pg/subscriptions/' . $subscription_id . '/pause'
+        );
+        if ($req->ok()) {
+            return ['status' => 'success', 'subscription_data' => (array) $req->object()];
+        }
+        return ['status' => 'failed', 'message' => 'Failed to pause Cashfree subscription.'];
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        $req = Http::withHeaders($this->getHeaders())->post(
+            $this->get_api_url() . '/pg/subscriptions/' . $subscription_id . '/resume'
+        );
+        if ($req->ok()) {
+            return ['status' => 'success', 'subscription_data' => (array) $req->object()];
+        }
+        return ['status' => 'failed', 'message' => 'Failed to resume Cashfree subscription.'];
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        $req = Http::withHeaders($this->getHeaders())->get($this->get_api_url() . '/pg/subscriptions/' . $subscription_id);
+        if ($req->ok()) {
+            return ['status' => 'success', 'subscription_data' => (array) $req->object()];
+        }
+        return ['status' => 'failed', 'message' => 'Subscription not found.'];
+    }
+
+    public function verify_webhook_signature($payload, $signature)
+    {
+        if (empty($this->getSecretKey()) || empty($signature) || empty($payload)) {
+            return false;
+        }
+        $expected = base64_encode(hash_hmac('sha256', $payload, $this->getSecretKey(), true));
+        return hash_equals($expected, (string) $signature);
     }
 }
