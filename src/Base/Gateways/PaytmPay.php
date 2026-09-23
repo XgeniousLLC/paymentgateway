@@ -5,12 +5,14 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
 use Xgenious\Paymentgateway\Base\PaymentGatewayHelpers;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Xgenious\Paymentgateway\Helpers\PaytmChecksum;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\IndianCurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 
-class PaytmPay extends PaymentGatewayBase
+class PaytmPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     use PaymentEnvironment, CurrencySupport, IndianCurrencySupport;
 
@@ -353,5 +355,112 @@ class PaytmPay extends PaymentGatewayBase
     {
         $url = $this->getEnv() ? "-stage" : "";
         return 'https://securegw' . $url . '.paytm.in';
+    }
+
+    public function recurring_frequency($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        // Paytm PPR frequency unit: 1 = daily, 2 = weekly, 3 = monthly, 4 = yearly.
+        return match($interval) {
+            'daily', 'day', 'days' => ['unit' => 1, 'count' => $interval_count],
+            'weekly', 'week', 'weeks' => ['unit' => 2, 'count' => $interval_count],
+            'monthly', 'month', 'months' => ['unit' => 3, 'count' => $interval_count],
+            'quarterly' => ['unit' => 3, 'count' => $interval_count * 3],
+            'biannually' => ['unit' => 3, 'count' => $interval_count * 6],
+            'yearly', 'annual', 'year', 'years' => ['unit' => 4, 'count' => $interval_count],
+            default => ['unit' => 3, 'count' => 1],
+        };
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        $charge_amount = $this->charge_amount($args['amount']);
+        $order_id = PaymentGatewayHelpers::wrapped_id($args['order_id']);
+        $final_amount = number_format((float) $charge_amount, 2, '.', '');
+        $freq = $this->recurring_frequency($args['recurring_interval'] ?? 'monthly', $args['recurring_interval_count'] ?? 1);
+        $paytmParams = [
+            'body' => [
+                'requestType' => 'Payment',
+                'mid' => $this->getMerchantId(),
+                'websiteName' => $this->getEnv() ? 'WEBSTAGING' : 'DEFAULT',
+                'orderId' => $order_id,
+                'callbackUrl' => $args['ipn_url'],
+                'txnAmount' => ['value' => $final_amount, 'currency' => 'INR'],
+                'userInfo' => ['custId' => $args['email'] ?? 'CUST_' . Str::random(10)],
+                'subscriptionAmountType' => 'FIX',
+                'subscriptionFrequency' => (string) $freq['unit'],
+                'subscriptionFrequencyUnit' => (string) $freq['count'],
+                'subscriptionExpiryDate' => gmdate('Y-m-d', strtotime('+10 years')),
+                'subscriptionEnableRetry' => '1',
+            ],
+        ];
+        $checksum = PaytmChecksum::generateSignature(json_encode($paytmParams['body'], JSON_UNESCAPED_SLASHES), $this->getMerchantKey());
+        $paytmParams['head'] = ['signature' => $checksum];
+        $url = $this->base_url() . '/theia/api/v1/initiateTransaction?mid=' . $this->getMerchantId() . '&orderId=' . $order_id;
+        $response = Http::withHeaders(['Content-Type' => 'application/json'])->withBody(json_encode($paytmParams, JSON_UNESCAPED_SLASHES))->post($url);
+        $result = $response->object();
+        if (property_exists($result->head ?? new \stdClass(), 'signature') && property_exists($result->body ?? new \stdClass(), 'txnToken')) {
+            session()->put('paytm_subscription_order_id', $order_id);
+            session()->put('paytm_subscription_log_id', $args['order_id']);
+            return view('paymentgateway::paytm', ['bladeData' => [
+                'host' => $this->base_url(),
+                'txnToken' => $result->body?->txnToken,
+                'order_id' => $order_id,
+                'amount' => $final_amount,
+                'success_url' => $args['success_url'],
+                'cancel_url' => $args['cancel_url'],
+                'merchant_id' => $this->getMerchantId(),
+            ]]);
+        }
+        abort(500, $result->body?->resultInfo?->resultMsg ?? 'Paytm subscription init failed.');
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        $payment_data = $this->ipn_response($args);
+        if (($payment_data['status'] ?? 'failed') === 'complete') {
+            $payment_data['is_recurring'] = true;
+            $payment_data['paytm_subscription_id'] = $payment_data['transaction_id'] ?? null;
+        }
+        return $payment_data;
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        $body = ['mid' => $this->getMerchantId(), 'subscriptionId' => $subscription_id];
+        $checksum = PaytmChecksum::generateSignature(json_encode($body, JSON_UNESCAPED_SLASHES), $this->getMerchantKey());
+        $url = $this->base_url() . '/subscription/cancel?mid=' . $this->getMerchantId() . '&subscriptionId=' . $subscription_id;
+        $response = Http::withHeaders(['Content-Type' => 'application/json'])
+            ->withBody(json_encode(['head' => ['signature' => $checksum], 'body' => $body], JSON_UNESCAPED_SLASHES))->post($url);
+        $result = $response->json();
+        if (!empty($result['body']['resultInfo']['resultStatus']) && $result['body']['resultInfo']['resultStatus'] === 'S') {
+            return ['status' => 'success', 'subscription_data' => $result['body']];
+        }
+        return ['status' => 'failed', 'message' => $result['body']['resultInfo']['resultMsg'] ?? 'Failed to cancel Paytm subscription.'];
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'Paytm subscriptions cannot be paused; cancel and recreate instead.'];
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'Paytm subscriptions cannot be resumed; create a new subscription instead.'];
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        $body = ['mid' => $this->getMerchantId(), 'subscriptionId' => $subscription_id];
+        $checksum = PaytmChecksum::generateSignature(json_encode($body, JSON_UNESCAPED_SLASHES), $this->getMerchantKey());
+        $url = $this->base_url() . '/subscription/status?mid=' . $this->getMerchantId() . '&subscriptionId=' . $subscription_id;
+        $response = Http::withHeaders(['Content-Type' => 'application/json'])
+            ->withBody(json_encode(['head' => ['signature' => $checksum], 'body' => $body], JSON_UNESCAPED_SLASHES))->post($url);
+        $result = $response->json();
+        if (!empty($result['body'])) {
+            return ['status' => 'success', 'subscription_data' => $result['body']];
+        }
+        return ['status' => 'failed', 'message' => 'Subscription not found.'];
     }
 }

@@ -5,12 +5,14 @@ namespace Xgenious\Paymentgateway\Base\Gateways;
 
 use Paytabscom\Laravel_paytabs\PaytabsEnum;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Xgenious\Paymentgateway\Traits\ConvertUsdSupport;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 use Paytabscom\Laravel_paytabs\Facades\paypage;
 
-class PayTabsPay extends PaymentGatewayBase
+class PayTabsPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
 
     use CurrencySupport,PaymentEnvironment,ConvertUsdSupport;
@@ -113,6 +115,84 @@ class PayTabsPay extends PaymentGatewayBase
             'paytabs.server_key' => $this->getServerKey()
         ]);
 
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        // First checkout tokenizes the card (tokenize=true); renewals reuse the
+        // saved token with tran_class=recurring via charge_saved_token().
+        $this->setConfig();
+        $order_id = random_int(12345,99999).$args['order_id'].random_int(12345,99999);
+        try {
+            $pay = paypage::sendPaymentCode('all')
+                ->sendTransaction('sale', PaytabsEnum::TRAN_CLASS_ECOM)
+                ->sendCart($order_id, $this->charge_amount($args['amount']), $args['description'])
+                ->sendURLs($args['ipn_url'], $args['success_url'])
+                ->sendLanguage('en')
+                ->sendHideShipping(true)
+                ->sendTokinse(true)
+                ->sendCustomerDetails($args['name'] ?? '', $args['email'] ?? '', $args['phone'] ?? '', '', '', '', '', '', request()->ip() ?? '127.0.0.1')
+                ->create_pay_page();
+            session()->put('paytabs_tokenize_order_id', $args['order_id']);
+            session()->put('paytabs_tokenize_cart', $order_id);
+            return $pay;
+        } catch (\Exception $e) {
+            abort(401, $e->getMessage());
+        }
+    }
+
+    public function charge_saved_token(array $args)
+    {
+        // Renewal charge against a token saved from the first checkout.
+        $this->setConfig();
+        $order_id = random_int(12345,99999).$args['order_id'].random_int(12345,99999);
+        try {
+            $pay = paypage::sendPaymentCode('all')
+                ->sendTransaction('sale', 'recurring')
+                ->sendCart($order_id, $this->charge_amount($args['amount']), $args['description'] ?? $args['title'] ?? '')
+                ->sendURLs($args['ipn_url'] ?? '', $args['success_url'] ?? '')
+                ->sendLanguage('en')
+                ->sendToken($args['paytabs_token'], $args['paytabs_transaction_ref'] ?? '')
+                ->create_pay_page();
+            return $pay;
+        } catch (\Exception $e) {
+            abort(401, $e->getMessage());
+        }
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        $payment_data = $this->ipn_response($args);
+        if (($payment_data['status'] ?? 'failed') === 'complete') {
+            $payment_data['is_recurring'] = true;
+            if (!empty(request()->token)) {
+                $payment_data['paytabs_token'] = request()->token;
+            }
+            if (!empty(request()->tranRef)) {
+                $payment_data['paytabs_transaction_ref'] = request()->tranRef;
+            }
+        }
+        return $payment_data;
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        return ['status' => 'failed', 'message' => 'PayTabs tokens are standing instructions; delete the saved token from the PayTabs dashboard to stop renewals.'];
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'PayTabs token renewals are app-scheduled; skip the next scheduled charge to pause.'];
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'PayTabs token renewals are app-scheduled; resume by scheduling the next charge.'];
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'PayTabs does not expose a token lookup API; verify via transaction query in the dashboard.'];
     }
 
     public function supported_currency_list() : array

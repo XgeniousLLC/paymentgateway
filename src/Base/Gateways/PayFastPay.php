@@ -4,13 +4,15 @@ namespace Xgenious\Paymentgateway\Base\Gateways;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Log;
 use Xgenious\Paymentgateway\Base\PaymentGatewayBase;
+use Xgenious\Paymentgateway\Base\RecurringSupport;
+use Xgenious\Paymentgateway\Base\SubscriptionLifecycle;
 use Xgenious\Paymentgateway\Models\PaymentMeta;
 use Xgenious\Paymentgateway\Traits\CurrencySupport;
 use Xgenious\Paymentgateway\Traits\PaymentEnvironment;
 use Xgenious\Paymentgateway\Traits\ZarCurrencySupport;
 
 
-class PayFastPay extends PaymentGatewayBase
+class PayFastPay extends PaymentGatewayBase implements RecurringSupport, SubscriptionLifecycle
 {
     protected $merchant_id;
     protected $merchant_key;
@@ -163,6 +165,13 @@ class PayFastPay extends PaymentGatewayBase
             'item_name'      => $item_name,
         ];
 
+        // Subscription checkout: PayFast recurring billing fields.
+        if (!empty($args['is_subscription'])) {
+            $sub = $this->recurring_fields($args['recurring_interval'] ?? 'monthly', $args['recurring_interval_count'] ?? 1);
+            $sub = array_filter($sub, fn($v) => !is_null($v));
+            $pfData = array_merge($pfData, $sub);
+        }
+
         // Generate signature
         $pfData['signature'] = $this->generateSignature($pfData);
 
@@ -250,5 +259,64 @@ class PayFastPay extends PaymentGatewayBase
         Config::set([
             'payfast.testing' => $this->getEnv(), // Set to false when in production.
         ]);
+    }
+
+    public function recurring_fields($interval, $interval_count = 1)
+    {
+        $interval = strtolower(trim((string) $interval));
+        $interval_count = max(1, (int) $interval_count);
+        // PayFast subscription_type: 1 = monthly, 2 = quarterly, 3 = half-yearly, 4 = yearly.
+        $type = match($interval) {
+            'daily', 'day', 'days' => 1,
+            'weekly', 'week', 'weeks' => 1,
+            'monthly', 'month', 'months' => 1,
+            'quarterly' => 2,
+            'biannually' => 3,
+            'yearly', 'annual', 'year', 'years' => 4,
+            default => 1,
+        };
+        return [
+            'subscription_type' => $type,
+            'billing_date' => gmdate('Y-m-d', strtotime('+1 month')),
+            'recurring_amount' => null,
+            'frequency' => $type === 1 ? ($interval === 'weekly' || $interval === 'week' || $interval === 'weeks' ? 7 : ($interval === 'daily' || $interval === 'day' || $interval === 'days' ? 1 : null)) : null,
+            'cycles' => 0,
+        ];
+    }
+
+    public function charge_customer_recurring(array $args)
+    {
+        $args['is_subscription'] = true;
+        $args['payment_type'] = $args['payment_type'] ?? 'monthly';
+        return $this->charge_customer($args);
+    }
+
+    public function ipn_response_recurring(array $args = [])
+    {
+        $payment_data = $this->ipn_response($args);
+        if (($payment_data['status'] ?? 'failed') === 'complete') {
+            $payment_data['is_recurring'] = true;
+        }
+        return $payment_data;
+    }
+
+    public function cancel_subscription($subscription_id, $at_period_end = true)
+    {
+        return ['status' => 'failed', 'message' => 'PayFast subscriptions are managed from the PayFast dashboard or the update-card link; no cancel API is exposed.'];
+    }
+
+    public function pause_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'PayFast subscriptions are managed from the PayFast dashboard; no pause API is exposed.'];
+    }
+
+    public function resume_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'PayFast subscriptions are managed from the PayFast dashboard; no resume API is exposed.'];
+    }
+
+    public function fetch_subscription($subscription_id)
+    {
+        return ['status' => 'failed', 'message' => 'PayFast does not expose a subscription fetch API; verify via ITN history in the dashboard.'];
     }
 }
