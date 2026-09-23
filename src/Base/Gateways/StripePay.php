@@ -177,6 +177,18 @@ class StripePay extends PaymentGatewayBase implements RecurringSupport, Subscrip
     public function charge_customer_from_controller(array $args){
         Stripe::setApiKey(base64_decode($args['secret_key']));
 
+        $session_data = $this->build_checkout_session_data($args);
+
+        $session = Session::create($session_data);
+
+        session()->put('stripe_session_id', $session->id);
+        session()->put('stripe_order_id', $args['order_id']);
+        session()->put('stripe_is_subscription', $session_data['mode'] === 'subscription');
+
+        return ['id' => $session->id];
+    }
+
+    public function build_checkout_session_data(array $args){
          $payment_types = ['card'];
 
         if( strtolower($args['currency']) === "myr" ){
@@ -233,27 +245,39 @@ class StripePay extends PaymentGatewayBase implements RecurringSupport, Subscrip
 
         $destination = $args['destination_account_id'] ?? $this->getDestinationAccountId();
         $fee = $args['application_fee_amount'] ?? $this->getApplicationFeeAmount();
-        $payment_intent_data = [];
-        if (!empty($destination)) {
-            $transfer = ['destination' => $destination];
-            if (!empty($fee)) {
-                $transfer['amount'] = (int) $fee;
+        if ($is_subscription) {
+            // payment_intent_data.transfer_data is rejected in subscription mode;
+            // destination charges on subscriptions go through subscription_data.
+            $subscription_data = [];
+            if (!empty($destination)) {
+                $subscription_data['transfer_data'] = ['destination' => $destination];
             }
-            $payment_intent_data['transfer_data'] = $transfer;
-        } elseif (!empty($fee)) {
-            $payment_intent_data['application_fee_amount'] = (int) $fee;
+            if (!empty($fee) && !empty($args['charge_amount'])) {
+                $percent = round(((int) $fee / (int) $args['charge_amount']) * 100, 2);
+                if ($percent > 0) {
+                    $subscription_data['application_fee_percent'] = $percent;
+                }
+            }
+            if (!empty($subscription_data)) {
+                $session_data['subscription_data'] = $subscription_data;
+            }
+        } else {
+            $payment_intent_data = [];
+            if (!empty($destination)) {
+                $transfer = ['destination' => $destination];
+                if (!empty($fee)) {
+                    $transfer['amount'] = (int) $fee;
+                }
+                $payment_intent_data['transfer_data'] = $transfer;
+            } elseif (!empty($fee)) {
+                $payment_intent_data['application_fee_amount'] = (int) $fee;
+            }
+            if (!empty($payment_intent_data)) {
+                $session_data['payment_intent_data'] = $payment_intent_data;
+            }
         }
-        if (!empty($payment_intent_data)) {
-            $session_data['payment_intent_data'] = $payment_intent_data;
-        }
 
-        $session = Session::create($session_data);
-
-        session()->put('stripe_session_id', $session->id);
-        session()->put('stripe_order_id', $args['order_id']);
-        session()->put('stripe_is_subscription', $is_subscription);
-
-        return ['id' => $session->id];
+        return $session_data;
     }
 
     public function charge_customer_recurring(array $args)

@@ -76,4 +76,58 @@ class StripePayTest extends TestCase
         $this->assertContains('EUR', $currencies);
         $this->assertContains('INR', $currencies);
     }
+
+    public function test_subscription_checkout_uses_subscription_data_for_connect()
+    {
+        $stripe = $this->gateway();
+        $stripe->setDestinationAccountId('acct_123')->setApplicationFeeAmount(100);
+
+        $data = $stripe->build_checkout_session_data([
+            'currency' => 'USD',
+            'title' => 'Monthly donation',
+            'description' => 'Monthly donation',
+            'charge_amount' => 2500,
+            'amount' => 25,
+            'order_id' => 42,
+            'track' => 'trk',
+            'ipn_url' => 'https://example.test/ipn',
+            'cancel_url' => 'https://example.test/cancel',
+            'email' => 'a@b.test',
+            'name' => 'Donor',
+            'payment_type' => 'monthly',
+            'is_subscription' => true,
+        ]);
+
+        $this->assertEquals('subscription', $data['mode']);
+        $this->assertArrayNotHasKey('payment_intent_data', $data);
+        $this->assertEquals('acct_123', $data['subscription_data']['transfer_data']['destination']);
+        $this->assertEquals(4.0, $data['subscription_data']['application_fee_percent']);
+        $this->assertEquals('month', $data['line_items'][0]['price_data']['recurring']['interval']);
+    }
+
+    public function test_onetime_checkout_uses_payment_intent_data_for_connect()
+    {
+        $stripe = $this->gateway();
+        $stripe->setDestinationAccountId('acct_123')->setApplicationFeeAmount(100);
+
+        $data = $stripe->build_checkout_session_data([
+            'currency' => 'USD',
+            'title' => 'One-time donation',
+            'description' => 'One-time donation',
+            'charge_amount' => 2500,
+            'amount' => 25,
+            'order_id' => 43,
+            'track' => 'trk',
+            'ipn_url' => 'https://example.test/ipn',
+            'cancel_url' => 'https://example.test/cancel',
+            'email' => 'a@b.test',
+            'name' => 'Donor',
+            'payment_type' => 'once',
+        ]);
+
+        $this->assertEquals('payment', $data['mode']);
+        $this->assertArrayNotHasKey('subscription_data', $data);
+        $this->assertEquals('acct_123', $data['payment_intent_data']['transfer_data']['destination']);
+        $this->assertEquals(100, $data['payment_intent_data']['transfer_data']['amount']);
+    }
 }

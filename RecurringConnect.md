@@ -20,7 +20,7 @@ Razorpay additionally accepts `plan_config` (`id,title,price,type,package_descri
 
 | Region | Gateway | Currency | Recurring | Notes |
 |---|---|---|---|---|
-| Global | **Stripe** | 135+ (USD,EUR,GBP,...) | ✅ native Billing subscriptions | Checkout `mode=subscription`; webhooks via `construct_webhook_event()`; Connect express + `transfer_data`/fee |
+| Global | **Stripe** | 135+ (USD,EUR,GBP,...) | ✅ native Billing subscriptions | Checkout `mode=subscription`; webhooks via `construct_webhook_event()`; Connect express + `subscription_data.transfer_data` / `application_fee_percent` in subscription mode (`payment_intent_data` in one-time mode) |
 | India | **Razorpay** | INR | ✅ native Subscriptions | Dynamic plan create/reuse; `pause/resume/cancel/fetch`; webhook secret verify |
 | India | Paytm | INR | ➖ one-time only | Keep email-reminder fallback |
 | India | Cashfree | INR | ➖ one-time only | Subscriptions API not wrapped yet |
